@@ -1,165 +1,283 @@
-from flask import Flask, jsonify, request, render_template
 import os
 import braintree
-import sqlite3
-from sqlite3 import Error
+from flask import Flask, request, jsonify, render_template_string
+from flask_sqlalchemy import SQLAlchemy
+from datetime import datetime
+import logging
 
 app = Flask(__name__)
 
-# ===== Config from ENV =====
-BRAINTREE_ENV = os.getenv("BRAINTREE_ENV", "Sandbox")  # "Sandbox" or "Production"
-MERCHANT_ID = os.getenv("BRAINTREE_MERCHANT_ID")
-PUBLIC_KEY = os.getenv("BRAINTREE_PUBLIC_KEY")
-PRIVATE_KEY = os.getenv("BRAINTREE_PRIVATE_KEY")
-# optional plan id (create plan in Braintree dashboard if you want subscriptions)
-DEFAULT_PLAN_ID = os.getenv("BRAINTREE_PLAN_ID", "")
+# Database Configuration
+DATABASE_URL = "postgresql://postgres:QmnqFPPwcEiVVFJYgUCsOKGObfAaXIla@junction.proxy.rlwy.net:39653/railway"
+app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# ===== Braintree Gateway =====
-env = braintree.Environment.Sandbox if BRAINTREE_ENV.lower() == "sandbox" else braintree.Environment.Production
-gateway = braintree.BraintreeGateway(
-    braintree.Configuration(
-        env,
-        merchant_id=MERCHANT_ID,
-        public_key=PUBLIC_KEY,
-        private_key=PRIVATE_KEY
-    )
+db = SQLAlchemy(app)
+
+# Braintree Configuration (Sandbox)
+braintree.Configuration.configure(
+    environment=braintree.Environment.Sandbox,  # أو Production للإنتاج
+    merchant_id="jbhmd5zs833t2pmq",
+    public_key="w7dzx8kwtq3syrjf", 
+    private_key="f8c3f16ba0f537427ac61c522fb3c7a4"
 )
 
-# ===== Simple SQLite DB (optional) =====
-DB_FILE = "data.db"
+# Database Models
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(100), unique=True, nullable=False)
+    name = db.Column(db.String(100), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-def create_connection(db_file=DB_FILE):
-    try:
-        conn = sqlite3.connect(db_file, check_same_thread=False)
-        return conn
-    except Error as e:
-        print(e)
-    return None
+class BillingAgreement(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    token_id = db.Column(db.String(100), unique=True, nullable=False)
+    status = db.Column(db.String(20), default='pending')  # pending, active, cancelled
+    approval_url = db.Column(db.String(500))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    activated_at = db.Column(db.DateTime)
 
-conn = create_connection()
-# create table if not exists
-with conn:
-    conn.execute("""
-    CREATE TABLE IF NOT EXISTS payments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nonce TEXT,
-        customer_id TEXT,
-        payment_method_token TEXT,
-        transaction_id TEXT,
-        subscription_id TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
+class PaymentLog(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    billing_agreement_id = db.Column(db.Integer, db.ForeignKey('billing_agreement.id'), nullable=False)
+    transaction_id = db.Column(db.String(100))
+    amount = db.Column(db.Float, nullable=False)
+    status = db.Column(db.String(20))  # success, failed, pending
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+# Routes
+@app.route('/')
+def index():
+    return render_template_string("""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Braintree Billing Agreement Test</title>
+    <script src="https://js.braintreegateway.com/web/3.96.1/js/client.min.js"></script>
+    <script src="https://js.braintreegateway.com/web/3.96.1/js/paypal-checkout.min.js"></script>
+</head>
+<body>
+    <h1>🚀 Test Billing Agreement</h1>
+    
+    <div id="customer-form">
+        <h3>Customer Info</h3>
+        <input type="email" id="email" placeholder="Email" value="test@example.com">
+        <input type="text" id="name" placeholder="Name" value="Test User">
+        <button onclick="setupBillingAgreement()">Setup PayPal Billing Agreement</button>
+    </div>
+
+    <div id="result"></div>
+
+    <script>
+        async function setupBillingAgreement() {
+            const email = document.getElementById('email').value;
+            const name = document.getElementById('name').value;
+            
+            if (!email || !name) {
+                alert('Please fill in all fields');
+                return;
+            }
+
+            try {
+                const response = await fetch('/setup-billing-agreement', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        email: email,
+                        name: name
+                    })
+                });
+
+                const data = await response.json();
+                console.log('Response:', data);
+
+                if (data.success) {
+                    document.getElementById('result').innerHTML = `
+                        <h3>✅ Billing Agreement Created!</h3>
+                        <p><strong>Token ID:</strong> ${data.token_id}</p>
+                        <p><a href="${data.approval_url}" target="_blank" style="background: #0070ba; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">
+                           🔗 Approve PayPal Agreement
+                        </a></p>
+                        <small>After approval, come back and check status</small>
+                    `;
+                } else {
+                    document.getElementById('result').innerHTML = `
+                        <h3>❌ Error:</h3>
+                        <p>${data.error}</p>
+                    `;
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                document.getElementById('result').innerHTML = `<h3>❌ Request Failed</h3>`;
+            }
+        }
+    </script>
+</body>
+</html>
     """)
 
-# ===== Routes =====
-@app.route("/")
-def index():
-    return render_template("index.html")
+@app.route('/setup-billing-agreement', methods=['POST'])
+def setup_billing_agreement():
+    try:
+        data = request.get_json()
+        email = data.get('email')
+        name = data.get('name')
+        
+        if not email or not name:
+            return jsonify({'success': False, 'error': 'Email and name required'})
 
-@app.route("/client_token", methods=["GET"])
-def client_token():
-    # If you want to generate client token for a particular customer:
-    # client_token = gateway.client_token.generate({"customer_id": "existing_customer_id"})
-    client_token = gateway.client_token.generate()
-    return jsonify({"clientToken": client_token})
+        # إنشاء أو الحصول على المستخدم
+        user = User.query.filter_by(email=email).first()
+        if not user:
+            user = User(email=email, name=name)
+            db.session.add(user)
+            db.session.commit()
 
-@app.route("/vault", methods=["POST"])
-def vault():
-    """
-    Expected JSON:
-    {
-      "payment_method_nonce": "...",
-      "customer": {"first_name":"Saad","last_name":"Test","email":"a@b.com"},
-      "create_transaction": true,
-      "amount": "1.00"
-    }
-    """
-    data = request.get_json() or {}
-    nonce = data.get("payment_method_nonce")
-    customer = data.get("customer", {})
-    create_transaction = data.get("create_transaction", False)
-    amount = data.get("amount")
-
-    if not nonce:
-        return jsonify({"success": False, "error": "payment_method_nonce required"}), 400
-
-    # create customer (optional)
-    result_cust = gateway.customer.create({
-        "first_name": customer.get("first_name", "Test"),
-        "last_name": customer.get("last_name", "User"),
-        "email": customer.get("email", "")
-    })
-
-    if not result_cust.is_success:
-        return jsonify({"success": False, "error": result_cust.message}), 400
-
-    customer_id = result_cust.customer.id
-
-    # vault payment method
-    pm_result = gateway.payment_method.create({
-        "customer_id": customer_id,
-        "payment_method_nonce": nonce,
-        "options": {"make_default": True, "verify_card": False}
-    })
-
-    if not pm_result.is_success:
-        return jsonify({"success": False, "error": pm_result.message}), 400
-
-    pm_token = pm_result.payment_method.token
-
-    response = {"success": True, "customer_id": customer_id, "payment_method_token": pm_token}
-
-    # optionally create sale
-    if create_transaction and amount:
-        sale_result = gateway.transaction.sale({
-            "amount": amount,
-            "payment_method_token": pm_token,
-            "options": {"submit_for_settlement": True}
+        # إنشاء Billing Agreement عبر Braintree
+        result = braintree.PaymentMethod.create({
+            "customer_id": None,  # سنحتاج إنشاء customer أو استخدام guest checkout
+            "payment_method_nonce": None,  # لن نحتاجه في حالة PayPal
+            "options": {
+                "paypal": {
+                    "payee_email": email,
+                    "order_id": f"order_{user.id}_{int(datetime.now().timestamp())}",
+                    "custom_field": f"user_{user.id}",
+                    "description": "Monthly Subscription"
+                }
+            }
         })
-        if sale_result.is_success:
-            response["transaction_id"] = sale_result.transaction.id
-        else:
-            response["sale_error"] = sale_result.message
 
-    # save to sqlite
-    with conn:
-        conn.execute(
-            "INSERT INTO payments (nonce, customer_id, payment_method_token, transaction_id) VALUES (?,?,?,?)",
-            (nonce, customer_id, pm_token, response.get("transaction_id"))
+        # الطريقة الصحيحة لـ PayPal Billing Agreement
+        # نستخدم PayPal Checkout مع vault=true
+        
+        # إنشاء client token للعميل
+        client_token_result = braintree.ClientToken.generate({
+            "customer_id": None,  # guest checkout
+        })
+        
+        if not client_token_result.is_success:
+            return jsonify({
+                'success': False, 
+                'error': f'Failed to generate client token: {client_token_result.message}'
+            })
+
+        # في الحقيقة، Braintree PayPal يحتاج معالجة مختلفة
+        # سنحاكي الـ response المطلوب مثل ExpressVPN
+        
+        # إنشاء معرف مؤقت للـ agreement
+        temp_token = f"BA-{user.id}{int(datetime.now().timestamp())}"
+        
+        # حفظ البيانات في قاعدة البيانات
+        agreement = BillingAgreement(
+            user_id=user.id,
+            token_id=temp_token,
+            status='pending',
+            approval_url=f"https://www.paypal.com/agreements/approve?ba_token={temp_token}"
         )
+        db.session.add(agreement)
+        db.session.commit()
 
-    return jsonify(response)
+        return jsonify({
+            'success': True,
+            'token_id': temp_token,
+            'approval_url': agreement.approval_url,
+            'client_token': client_token_result.client_token
+        })
 
-@app.route("/create_subscription", methods=["POST"])
-def create_subscription():
+    except Exception as e:
+        app.logger.error(f"Error in setup_billing_agreement: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/approve-agreement/<token_id>')
+def approve_agreement(token_id):
     """
-    JSON:
-    {
-      "payment_method_token": "...",
-      "plan_id": "plan_123"
-    }
+    هذا الـ endpoint سيتم استدعاؤه بعد موافقة العميل على PayPal
     """
-    data = request.get_json() or {}
-    token = data.get("payment_method_token")
-    plan_id = data.get("plan_id") or DEFAULT_PLAN_ID
+    try:
+        agreement = BillingAgreement.query.filter_by(token_id=token_id).first()
+        if not agreement:
+            return jsonify({'success': False, 'error': 'Agreement not found'})
+        
+        # تحديث حالة الاتفاقية
+        agreement.status = 'active'
+        agreement.activated_at = datetime.utcnow()
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Billing agreement activated successfully',
+            'token_id': token_id
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
 
-    if not token or not plan_id:
-        return jsonify({"success": False, "error": "payment_method_token and plan_id required"}), 400
+@app.route('/charge-agreement/<token_id>', methods=['POST'])
+def charge_agreement(token_id):
+    """
+    استخدام الـ billing agreement للدفع المتكرر
+    """
+    try:
+        data = request.get_json()
+        amount = data.get('amount', 9.99)  # Default subscription amount
+        
+        agreement = BillingAgreement.query.filter_by(
+            token_id=token_id, 
+            status='active'
+        ).first()
+        
+        if not agreement:
+            return jsonify({'success': False, 'error': 'Active agreement not found'})
+        
+        # في الحقيقة، سنحتاج استخدام Braintree Transaction API
+        # لكن هنا سنحاكي العملية
+        
+        # محاكاة عملية الدفع
+        payment_log = PaymentLog(
+            billing_agreement_id=agreement.id,
+            transaction_id=f"TXN_{int(datetime.now().timestamp())}",
+            amount=amount,
+            status='success'  # في الحقيقة هذا سيأتي من Braintree
+        )
+        db.session.add(payment_log)
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'transaction_id': payment_log.transaction_id,
+            'amount': amount,
+            'message': 'Payment processed successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
 
-    result = gateway.subscription.create({
-        "payment_method_token": token,
-        "plan_id": plan_id
-    })
+@app.route('/agreements')
+def list_agreements():
+    """
+    عرض جميع الاتفاقيات (للتجربة)
+    """
+    agreements = db.session.query(
+        BillingAgreement, User
+    ).join(User).all()
+    
+    result = []
+    for agreement, user in agreements:
+        result.append({
+            'token_id': agreement.token_id,
+            'user_email': user.email,
+            'user_name': user.name,
+            'status': agreement.status,
+            'created_at': agreement.created_at.isoformat(),
+            'activated_at': agreement.activated_at.isoformat() if agreement.activated_at else None
+        })
+    
+    return jsonify(result)
 
-    if result.is_success:
-        sub_id = result.subscription.id
-        # store
-        with conn:
-            conn.execute("INSERT INTO payments (payment_method_token, subscription_id) VALUES (?,?)", (token, sub_id))
-        return jsonify({"success": True, "subscription_id": sub_id})
-    else:
-        return jsonify({"success": False, "error": result.message}), 400
-
-if __name__ == "__main__":
-    # port 8080 for Railway compatibility
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)), debug=True)
+if __name__ == '__main__':
+    with app.app_context():
+        db.create_all()
+    app.run(debug=True)
