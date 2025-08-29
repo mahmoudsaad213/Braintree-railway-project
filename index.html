@@ -1,1 +1,56 @@
 
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Braintree Drop-in Test</title>
+  <script src="https://js.braintreegateway.com/web/dropin/1.41.0/js/dropin.min.js"></script>
+</head>
+<body>
+  <h2>اختبار دفع - Braintree Drop-in (Visa & PayPal)</h2>
+  <div id="dropin-container"></div>
+  <button id="submit-button">Pay / Save</button>
+
+  <script>
+    // fetch client token from server
+    fetch("/client_token")
+      .then(r => r.json())
+      .then(data => {
+        const clientToken = data.clientToken;
+        braintree.dropin.create({
+          authorization: clientToken,
+          container: "#dropin-container",
+          paypal: { flow: "vault" } // 'vault' -> حفظ PayPal method for future payments
+        }, function(err, dropinInstance) {
+          if (err) {
+            console.error("Drop-in create error", err);
+            alert("Drop-in error: " + err.message);
+            return;
+          }
+          document.getElementById("submit-button").addEventListener("click", function() {
+            dropinInstance.requestPaymentMethod(function(err, payload) {
+              if (err) { console.error(err); alert("Request payment method error"); return; }
+              // payload.nonce available here
+              console.log("Got nonce:", payload.nonce);
+              // send nonce to server to vault & optionally create a transaction
+              fetch("/vault", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  payment_method_nonce: payload.nonce,
+                  create_transaction: true,
+                  amount: "1.00",
+                  customer: { first_name: "Saad", email: "test@example.com" }
+                })
+              }).then(r => r.json()).then(resp => {
+                console.log("Vault response:", resp);
+                alert("Server response: " + JSON.stringify(resp));
+              });
+            });
+          });
+        });
+      })
+      .catch(err => { console.error("client token fetch error", err); alert("Failed fetching client token"); });
+  </script>
+</body>
+</html>
